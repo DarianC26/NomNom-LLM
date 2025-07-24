@@ -19,3 +19,10 @@ Routes:
 - /generate: takes a cooking question + recipe + step and returns a helpful cooking answer.
 
 - /ingredient-sub: takes an ingredient name and returns common substitutes.
+
+Core:
+- generation_service is a file that has the functions that prompt the LLM directly for the routes to use
+- model_loader loads the trained or untrained LLM depending before API can receive request
+
+Models:
+- Schemas/Object mapping basically for the HTTP request bodies/responses
