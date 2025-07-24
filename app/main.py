@@ -14,6 +14,7 @@ import uvicorn
 import logging
 import os
 from contextlib import asynccontextmanager
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -24,27 +25,20 @@ model = None
 tokenizer = None
 text_generator = None
 
-# Pydantic models for request/response
+# Pydantic models
 class CookingQuery(BaseModel):
     prompt: str
-    max_length: Optional[int] = 200
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 0.9
-    do_sample: Optional[bool] = True
-
-class RecipeRequest(BaseModel):
-    ingredients: List[str]
-    cuisine_type: Optional[str] = "any"
-    dietary_restrictions: Optional[List[str]] = []
-    difficulty: Optional[str] = "medium"
-
-class TechniqueQuery(BaseModel):
-    technique: str
-    context: Optional[str] = None
+    recipe: str
+    step: str
 
 class CookingResponse(BaseModel):
     response: str
-    confidence: Optional[float] = None
+
+class IngredientSubQuery(BaseModel):
+    ingredient: str
+
+class IngredientSubResponse(BaseModel):
+    substitutes: List[str]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -129,26 +123,13 @@ app.add_middleware(
 )
 
 # Helper function to generate cooking responses
-def generate_cooking_response(prompt: str, **kwargs) -> str:
+def generate_cooking_response(recipe: str, step: str, prompt: str, **kwargs) -> str:
     """Generate cooking-related response using the loaded model"""
-    
-    if text_generator is None:
-        # Mock responses for development/demo
-        mock_responses = {
-            "sauté": "Sautéing involves cooking food quickly in a small amount of fat over high heat while stirring frequently. The key is to keep ingredients moving to prevent burning while achieving a golden color and tender texture.",
-            "braise": "Braising combines dry and wet heat cooking. First, sear the protein to develop flavor, then add liquid and cook slowly at low temperature. This technique transforms tough cuts into tender, flavorful dishes.",
-            "recipe": "Here's a simple technique: Always preheat your pan before adding oil, then add ingredients when the oil shimmers. This prevents sticking and ensures even cooking.",
-            "knife skills": "Proper knife technique starts with the grip - pinch the blade with thumb and forefinger, curl fingers of guide hand. Rock the knife, don't chop straight down."
-        }
-        
-        for key, response in mock_responses.items():
-            if key.lower() in prompt.lower():
-                return response
-        
-        return "I'm a cooking assistant focused on techniques, recipes, and culinary advice. How can I help you improve your cooking skills today?"
-    
-    # Format prompt for cooking context
-    cooking_prompt = f"As a cooking expert, {prompt}\n\nResponse:"
+
+    # This is a cooking prompt for general questions
+    cooking_prompt = f"As a cooking expert, a home cook is following this recipe: {recipe} \
+        and they are on this step: {step}. The home cook has this general question: {prompt}. \
+            Respond in a way to help resolve their problem:"
     
     try:
         # Generate response
@@ -171,6 +152,58 @@ def generate_cooking_response(prompt: str, **kwargs) -> str:
     except Exception as e:
         logger.error(f"Error generating response: {str(e)}")
         return "I apologize, but I'm having trouble generating a response right now. Please try again."
+
+def generate_ingredient_substitutes(ingredient: str) -> List[str]:
+    """Generate ingredient substitutes using the loaded model"""
+    
+    # prompt specifically for ingredient substitution
+    substitute_prompt = f"List ingredient substitutes for {ingredient}. \
+        Respond with only comma seperated ingredients: "
+    
+    try:
+        if text_generator is None:
+            # basic mvp, just have commonly substituted ingredients for demoing/speed
+            fallback_subs = {
+                "butter": ["margarine", "coconut oil", "vegetable oil", "applesauce"],
+                "eggs": ["flax eggs", "chia eggs", "applesauce", "mashed banana"],
+                "milk": ["almond milk", "soy milk", "oat milk", "coconut milk"],
+                "flour": ["almond flour", "coconut flour", "rice flour", "oat flour"],
+                "sugar": ["honey", "maple syrup", "stevia", "coconut sugar"],
+                "salt": ["sea salt", "garlic powder", "onion powder", "herbs"],
+                "vanilla": ["almond extract", "lemon extract", "rum extract", "vanilla paste"]
+            }
+            
+            ingredient_lower = ingredient.lower()
+            for key in fallback_subs:
+                if key in ingredient_lower:
+                    return fallback_subs[key]
+            
+            return ["No common substitutes found"]
+        
+        # generate response using the model
+        outputs = text_generator(
+            substitute_prompt,
+            max_length=150,
+            temperature=0.7,
+            top_p=0.9,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id,
+            num_return_sequences=1
+        )
+        
+        # extract text
+        generated_text = outputs[0]['generated_text']
+        response = generated_text.replace(substitute_prompt, "").strip()
+        
+        # parse the ingredients by line
+        substitutes = response.split(',')
+        substitutes = []
+        
+        return substitutes[:5]  # limiting to 5
+        
+    except Exception as e:
+        logger.error(f"Error generating ingredient substitutes: {str(e)}")
+        return [f"Unable to find substitutes for {ingredient}"]
 
 @app.get("/")
 async def root():
@@ -204,78 +237,17 @@ async def generate_cooking_advice(query: CookingQuery):
         logger.error(f"Error in generate endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail="Error generating response")
 
-@app.post("/recipe", response_model=CookingResponse)
-async def get_recipe_suggestions(recipe_req: RecipeRequest):
-    """Get recipe suggestions based on ingredients and preferences"""
-    
-    # Build prompt
-    ingredients_str = ", ".join(recipe_req.ingredients)
-    restrictions_str = ", ".join(recipe_req.dietary_restrictions) if recipe_req.dietary_restrictions else "none"
-    
-    prompt = f"""
-    Please suggest a {recipe_req.difficulty} difficulty {recipe_req.cuisine_type} recipe using these ingredients: {ingredients_str}.
-    Dietary restrictions: {restrictions_str}.
-    Include cooking techniques and brief instructions.
-    """
+@app.post("/ingredient-sub", response_model=IngredientSubResponse)
+async def get_ingredient_substitutes(query: IngredientSubQuery):
+    """Get substitutes for a specific ingredient"""
     
     try:
-        response = generate_cooking_response(prompt.strip())
-        return CookingResponse(response=response)
+        substitutes = generate_ingredient_substitutes(query.ingredient)
+        return IngredientSubResponse(substitutes=substitutes)
         
     except Exception as e:
-        logger.error(f"Error in recipe endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error generating recipe")
-
-@app.post("/technique", response_model=CookingResponse)
-async def explain_cooking_technique(technique_query: TechniqueQuery):
-    """Explain a specific cooking technique"""
-    
-    context_part = f" in the context of {technique_query.context}" if technique_query.context else ""
-    prompt = f"Explain the cooking technique '{technique_query.technique}'{context_part}. Include tips for success and common mistakes to avoid."
-    
-    try:
-        response = generate_cooking_response(prompt)
-        return CookingResponse(response=response)
-        
-    except Exception as e:
-        logger.error(f"Error in technique endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error explaining technique")
-
-@app.get("/techniques")
-async def list_cooking_techniques():
-    """List common cooking techniques"""
-    techniques = {
-        "dry_heat": [
-            "Sautéing", "Pan-frying", "Deep-frying", "Roasting", 
-            "Baking", "Grilling", "Broiling", "Smoking"
-        ],
-        "moist_heat": [
-            "Boiling", "Simmering", "Poaching", "Steaming", 
-            "Braising", "Stewing", "Sous vide"
-        ],
-        "combination": [
-            "Braising", "Stewing", "Fricassee"
-        ],
-        "knife_techniques": [
-            "Julienne", "Brunoise", "Chiffonade", "Dice", "Mince"
-        ]
-    }
-    
-    return {"cooking_techniques": techniques}
-
-@app.get("/tips/{category}")
-async def get_cooking_tips(category: str):
-    """Get cooking tips for specific categories"""
-    
-    prompt = f"Provide 5 essential cooking tips for {category.replace('_', ' ')} cooking. Be specific and practical."
-    
-    try:
-        response = generate_cooking_response(prompt)
-        return CookingResponse(response=response)
-        
-    except Exception as e:
-        logger.error(f"Error getting tips: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error getting cooking tips")
+        logger.error(f"Error in ingredient-sub endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error finding ingredient substitutes")
 
 if __name__ == "__main__":
     # For development
