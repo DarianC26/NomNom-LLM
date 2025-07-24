@@ -18,4 +18,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(cooking.router)
+app.include_router(llm_qa.router)
